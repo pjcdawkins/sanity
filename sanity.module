@@ -95,11 +95,14 @@ function sanity_check($refresh = NULL) {
   // to TRUE and a refresh can be skipped (even if there is no data) by setting
   // $refresh to FALSE.
   $cache = cache_get('sanity_check');
-  if ($refresh !== TRUE && $cache && REQUEST_TIME < $cache->expire) {
+  $created = $cache ? $cache->created : 0;
+  $expire = $cache ? $cache->created + variable_get('sanity_refresh_timer', 86400) : 0;
+
+  if ($refresh !== TRUE && $cache && REQUEST_TIME < $expire) {
     return $cache->data;
   }
   elseif ($refresh !== FALSE) {
-    return sanity_refresh();
+    return sanity_refresh($created);
   }
   else {
     return [];
@@ -109,8 +112,8 @@ function sanity_check($refresh = NULL) {
 /**
  * Refresh sanity check.
  */
-function sanity_refresh() {
-  $checks = module_invoke_all('sanity');
+function sanity_refresh($last_refreshed) {
+  $checks = module_invoke_all('sanity', $last_refreshed);
 
   $sanity = [];
 
@@ -125,8 +128,9 @@ function sanity_refresh() {
     $results = [];
 
     if ($check['query']) {
-      $fetch_mode = $check['fetch_cb'] ? PDO::FETCH_FUNC : PDO::FETCH_OBJ;
-      $results = db_query($check['query'], $check['params'])->fetchAll($fetch_mode, $check['fetch_cb']);
+      $stmt = db_query($check['query'], $check['params']);
+      $queried = $stmt->fetchAll();
+      $results = ($check['fetch_cb'] ? array_map($check['fetch_cb'], $queried) : $queried);
     }
     else {
       if (function_exists($check['results_cb'])) {
@@ -142,8 +146,9 @@ function sanity_refresh() {
     }
   }
 
-  $expire = time() + variable_get('sanity_refresh_timer', 86400);
-  cache_set('sanity_check', $sanity, 'cache', $expire);
+  // We don't want this cache cleared automatically; we use it to track the
+  // last-checked time.
+  cache_set('sanity_check', $sanity, 'cache', CACHE_PERMANENT);
 
   return $sanity;
 }
@@ -210,6 +215,7 @@ function sanity_additional_emails_validate($element, &$form_state) {
  */
 function sanity_check_page() {
   $sanity = sanity_check();
+  $rows = [];
   foreach ($sanity as $key => $results) {
     foreach ($results as $r) {
       $rows[] = sanity_table_row($r, $key);
@@ -218,32 +224,24 @@ function sanity_check_page() {
 
   $page = [
     '#title' => t('Sanity Check Results'),
-    '#theme' => 'page',
-    '#type' => 'page',
-    '#show_message' => TRUE,
+      '#theme' => 'page',
+      '#type' => 'page',
+      '#show_message' => TRUE,
     ];
-
-  if (empty($rows)) {
-    $page['content'] = [
-      '#type' => 'markup',
-      '#markup' => t('Congratulations! Nothing insane is wrong with your site.'),
-    ];
-  }
-  else {
-    $page['content'] = [
-      '#theme' => 'table',
-      '#header' => [
-        'Type',
-        'Message',
-        'Link',
-      ],
-      '#attributes' => [
-        'class' => ['system-status-report'],
-      ],
-      '#rows' => $rows,
-      '#sticky' => FALSE,
-    ];
-  }
+  $page['content'] = [
+    '#theme' => 'table',
+    '#header' => [
+      'Type',
+      'Message',
+      'Link',
+    ],
+    '#attributes' => [
+      'class' => ['system-status-report'],
+    ],
+    '#rows' => $rows,
+    '#sticky' => FALSE,
+    '#empty' => t('Congratulations! Nothing insane is wrong with your site.'),
+  ];
 
   return $page;
 }
@@ -258,7 +256,12 @@ function sanity_table_row($result, $key = '') {
 
   $cells[0] = empty($result->type) ? $key : $result->type;
   $cells[1] = $result->message;
-  $cells[2] = !empty($result->link_text) ? l($result->link_text, $result->link_path, $result->link_opts) : '';
+  if (!empty($result->link_raw)) {
+    $cells[2] = filter_xss($result->link_raw);
+  }
+  else {
+    $cells[2] = !empty($result->link_text) ? l($result->link_text, $result->link_path, $result->link_opts) : '';
+  }
 
   $row['class'] = [sanity_severity_class($result->severity)];
   $row['no_striping'] = TRUE;
@@ -289,36 +292,37 @@ function sanity_severity_class($wd = WATCHDOG_WARNING) {
   }
 }
 
-// Testing
+// Implement on behalf of dblog.
 
-// function sanity_sanity() {
-//   return [
-//     'test_check' => [
-//       'results_cb' => 'sanity_test',
-//       'params' => ['test' => "Hi"],
-//     ],
-//   ];
-// }
-//
-// function sanity_test($hello) {
-//   return [
-//     (object) [
-//       'type' => 'Everything',
-//       'message' => t('Everything is broken!!!'),
-//       'link_text' => 'Oops',
-//       'link_path' => 'admin/reports/status',
-//       'link_opts' => [],
-//     ],
-//     (object) [
-//       'message' => t('Everything is broken!!!'),
-//       'link_text' => 'Oops',
-//       'link_path' => 'admin/reports/status',
-//       'link_opts' => [],
-//     ],
-//   ];
-// }
+/**
+ * Implements hook_sanity() on behalf of dblog.
+ */
+function dblog_sanity($last_refreshed) {
+  $items = [];
 
+  $items['watchdog_alerts'] = [
+    'query' => "SELECT * FROM watchdog WHERE timestamp > :ts AND severity <= :sev;",
+    'params' => [
+      ':ts' => max($last_refreshed, time() - 604800),
+      ':sev' => WATCHDOG_ERROR,
+    ],
+    'fetch_cb' => 'dblog_sanity_prepare',
+  ];
 
+  return $items;
+}
 
+/**
+ * Turn a watchdog object into a sanity object
+ */
+function dblog_sanity_prepare($wd) {
+  $o = new stdClass();
+  $o->message = theme('dblog_message', ['event' => $wd, 'link' => TRUE]);
+  $o->type = "Watchdog: $wd->type";
+  $o->link_raw = $wd->link;
+  $o->severity = $wd->severity;
+
+  return $o;
+}
 
 
