@@ -1,0 +1,295 @@
+<?php
+
+// Hooks
+
+/**
+ * Implements hook_menu().
+ */
+function sanity_menu() {
+  $items = [];
+
+  $items['admin/reports/sanity/settings'] = [
+    'title' => t('Settings'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => ['sanity_settings_form'],
+    'access arguments' => ['administer site configuration'],
+    'type' => MENU_LOCAL_TASK,
+  ];
+
+  $items['admin/reports/sanity'] = [
+    'title' => t('Sanity Check Report'),
+    'page callback' => 'sanity_check_page',
+    'type' => MENU_NORMAL_ITEM,
+    'access arguments' => ['access site reports'],
+  ];
+
+  $items['admin/reports/sanity/view'] = [
+    'title' => t('Report'),
+    'page callback' => 'sanity_check_page',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'access arguments' => ['access site reports'],
+  ];
+
+  return $items;
+}
+
+/**
+ * Implements hook_requirements().
+ */
+function sanity_requirements($phase) {
+  if ($phase == 'runtime') {
+    $sanity = sanity_check();
+    $reqs = [];
+
+    if (!empty($sanity)) {
+      $reqs['sanity_check'] = [
+        'title' => t('Sanity Check'),
+        'value' => t('Sanity check failed!'),
+        'description' => t('The following sanity checks on your site have failed: ') . implode(', ', array_keys($sanity)),
+      ];
+    }
+
+    return $reqs;
+  }
+}
+
+/**
+ * Implements hook_cron().
+ */
+function sanity_cron() {
+  $sanity = sanity_check(variable_get('sanity_cron', FALSE));
+  if (variable_get('sanity_email_warnings', FALSE)) {
+    sanity_email_warning($sanity);
+  }
+}
+
+/**
+ * Implements hook_views_api().
+ */
+function sanity_views_api() {
+  return [
+    'api' => '3',
+    'path' => drupal_get_path('module', 'sanity') . "/views",
+  ];
+}
+
+// Logic
+
+/**
+ * Get sanity check results.
+ */
+function sanity_check($refresh = NULL) {
+  // By default, this function tries to refresh only if there is no cached data
+  // or the cached data is expired. A refresh can be forced by setting $refresh
+  // to TRUE and a refresh can be skipped (even if there is no data) by setting
+  // $refresh to FALSE.
+  $cache = cache_get('sanity_check');
+  if ($refresh !== TRUE && $cache && REQUEST_TIME < $cache->expire) {
+    return $cache->data;
+  }
+  elseif ($refresh !== FALSE) {
+    return sanity_refresh();
+  }
+  else {
+    return [];
+  }
+}
+
+/**
+ * Refresh sanity check.
+ */
+function sanity_refresh() {
+  $checks = module_invoke_all('sanity');
+
+  $sanity = [];
+
+  foreach ($checks as $key => $check) {
+    $check += [
+      'query' => FALSE,
+      'fetch_cb' => '',
+      'params' => [],
+      'results_cb' => '',
+    ];
+
+    $results = [];
+
+    if ($check['query']) {
+      $fetch_mode = $check['fetch_cb'] ? PDO::FETCH_FUNC : PDO::FETCH_OBJ;
+      $results = db_query($check['query'], $check['params'])->fetchAll($fetch_mode, $check['fetch_cb']);
+    }
+    else {
+      if (function_exists($check['results_cb'])) {
+        $results = call_user_func_array($check['results_cb'], $check['params']);
+      }
+      else {
+        $results = [];
+      }
+    }
+
+    if (!empty($results)) {
+      $sanity[$key] = $results;
+    }
+  }
+
+  $expire = time() + variable_get('sanity_refresh_timer', 86400);
+  cache_set('sanity_check', $sanity, 'cache', $expire);
+
+  return $sanity;
+}
+
+// Pages
+
+/**
+ * Sanity settings page.
+ */
+function sanity_settings_form($form, &$form_state) {
+  $form['#title'] = t('Sanity Settings Form');
+
+  $form['sanity_refresh_timer'] = [
+    '#type' => 'textfield',
+    '#default_value' => variable_get('sanity_refresh_timer', 86400),
+    '#title' => t('Sanity check refresh timer'),
+    '#description' => t('The time in seconds before sanity check results will be automatically refreshed.'),
+  ];
+
+  $form['sanity_cron'] = [
+    '#type' => 'checkbox',
+    '#default_value' => variable_get('sanity_cron', FALSE),
+    '#title' => t('Sanity check cron'),
+    '#description' => t('If enabled, the Sanity module will run a sanity check during every site cron run. Keep this in mind if you have a low sanity refresh rate, frequent crons, and expensive sanity checks.'),
+  ];
+
+  $form['sanity_email_warnings'] = [
+    '#type' => 'checkbox',
+    '#default_value' => variable_get('sanity_email_warnings', FALSE),
+    '#title' => t('Sanity e-mail warning'),
+    '#description' => t('Send an e-mail warning to the site administrator and others when sanity checks are failing.'),
+  ];
+
+  $form['sanity_additional_emails'] = [
+    '#type' => 'textarea',
+    '#default_value' => implode("\n", variable_get('sanity_additional_emails', [])),
+    '#title' => t('Additional warning targets'),
+    '#description' => t('Send the sanity check e-mail warning to the following targets in addition to the site administrator.'),
+  ];
+
+  return system_settings_form($form);
+}
+
+/**
+ * Sanity check report page.
+ */
+function sanity_check_page() {
+  $sanity = sanity_check(TRUE);
+  foreach ($sanity as $key => $results) {
+    foreach ($results as $r) {
+      $rows[] = sanity_table_row($r, $key);
+    }
+  }
+
+  $page = [
+    '#title' => t('Sanity Check Results'),
+    '#theme' => 'page',
+    '#type' => 'page',
+    '#show_message' => TRUE,
+    ];
+
+  if (empty($rows)) {
+    $page['content'] = [
+      '#type' => 'markup',
+      '#markup' => t('Congratulations! Nothing insane is wrong with your site.'),
+    ];
+  }
+  else {
+    $page['content'] = [
+      '#theme' => 'table',
+      '#header' => [
+        'Type',
+        'Message',
+        'Link',
+      ],
+      '#attributes' => [
+        'class' => ['system-status-report'],
+      ],
+      '#rows' => $rows,
+      '#sticky' => FALSE,
+    ];
+  }
+
+  return $page;
+}
+
+/**
+ * Turn a sanity result object into a table row.
+ */
+function sanity_table_row($result, $key = '') {
+  if (empty($result->severity)) {
+    $result->severity = WATCHDOG_WARNING;
+  }
+
+  $cells[0] = empty($result->type) ? $key : $result->type;
+  $cells[1] = $result->message;
+  $cells[2] = !empty($result->link_text) ? l($result->link_text, $result->link_path, $result->link_opts) : '';
+
+  $row['class'] = [sanity_severity_class($result->severity)];
+  $row['no_striping'] = TRUE;
+  $row['data'] = $cells;
+
+  return $row;
+}
+
+/**
+ * Turn a watchdog severity level into a row class.
+ */
+function sanity_severity_class($wd = WATCHDOG_WARNING) {
+  switch ($wd) {
+  case WATCHDOG_INFO:
+  case WATCHDOG_DEBUG:
+  case WATCHDOG_NOTICE:
+    return 'ok';
+    break;
+  case WATCHDOG_WARNING:
+  case WATCHDOG_ERROR:
+    return 'warning';
+    break;
+  case WATCHDOG_ALERT:
+  case WATCHDOG_CRITICAL:
+  case WATCHDOG_EMERGENCY:
+    return 'error';
+    break;
+  }
+}
+
+// Testing
+
+function sanity_sanity() {
+  return [
+    'test_check' => [
+      'results_cb' => 'sanity_test',
+      'params' => ['test' => "Hi"],
+    ],
+  ];
+}
+
+function sanity_test($hello) {
+  return [
+    (object) [
+      'type' => 'Everything',
+      'message' => t('Everything is broken!!!'),
+      'link_text' => 'Oops',
+      'link_path' => 'admin/reports/status',
+      'link_opts' => [],
+    ],
+    (object) [
+      'message' => t('Everything is broken!!!'),
+      'link_text' => 'Oops',
+      'link_path' => 'admin/reports/status',
+      'link_opts' => [],
+    ],
+  ];
+}
+
+
+
+
+

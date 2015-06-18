@@ -1,0 +1,9 @@
+name = Sanity Check
+description = Always have a good idea if anything is terribly wrong with your site.
+
+php = 5.4
+core = 7.x
+package = Administration
+configure = admin/reports/sanity/settings
+
+
