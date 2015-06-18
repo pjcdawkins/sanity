@@ -3,6 +3,17 @@
 // Hooks
 
 /**
+ * Implements hook_hook_info().
+ */
+function sanity_hook_info() {
+  $hooks['sanity'] = [
+    'group' => 'sanity',
+  ];
+
+  return $hooks;
+}
+
+/**
  * Implements hook_menu().
  */
 function sanity_menu() {
@@ -168,7 +179,9 @@ function sanity_settings_form($form, &$form_state) {
 
   $form['sanity_additional_emails'] = [
     '#type' => 'textarea',
-    '#default_value' => implode("\n", variable_get('sanity_additional_emails', [])),
+    '#default_value' => variable_get('sanity_additional_emails', []),
+    '#value_callback' => 'sanity_additional_emails_value',
+    '#element_validate' => ['sanity_additional_emails_validate'],
     '#title' => t('Additional warning targets'),
     '#description' => t('Send the sanity check e-mail warning to the following targets in addition to the site administrator.'),
   ];
@@ -176,11 +189,27 @@ function sanity_settings_form($form, &$form_state) {
   return system_settings_form($form);
 }
 
+function sanity_additional_emails_value($element, $input = FALSE, &$form_state) {
+  if ($input === FALSE) {
+    return implode("\n", $element['#default_value']);
+  }
+  else {
+    return $element['#value'];
+  }
+}
+
+function sanity_additional_emails_validate($element, &$form_state) {
+  if (!empty($element['#value'])) {
+    $value = explode("\n", str_replace("\r", "", $element['#value']));
+    form_set_value($element, $value, $form_state);
+  }
+}
+
 /**
  * Sanity check report page.
  */
 function sanity_check_page() {
-  $sanity = sanity_check(TRUE);
+  $sanity = sanity_check();
   foreach ($sanity as $key => $results) {
     foreach ($results as $r) {
       $rows[] = sanity_table_row($r, $key);
@@ -262,32 +291,32 @@ function sanity_severity_class($wd = WATCHDOG_WARNING) {
 
 // Testing
 
-function sanity_sanity() {
-  return [
-    'test_check' => [
-      'results_cb' => 'sanity_test',
-      'params' => ['test' => "Hi"],
-    ],
-  ];
-}
-
-function sanity_test($hello) {
-  return [
-    (object) [
-      'type' => 'Everything',
-      'message' => t('Everything is broken!!!'),
-      'link_text' => 'Oops',
-      'link_path' => 'admin/reports/status',
-      'link_opts' => [],
-    ],
-    (object) [
-      'message' => t('Everything is broken!!!'),
-      'link_text' => 'Oops',
-      'link_path' => 'admin/reports/status',
-      'link_opts' => [],
-    ],
-  ];
-}
+// function sanity_sanity() {
+//   return [
+//     'test_check' => [
+//       'results_cb' => 'sanity_test',
+//       'params' => ['test' => "Hi"],
+//     ],
+//   ];
+// }
+//
+// function sanity_test($hello) {
+//   return [
+//     (object) [
+//       'type' => 'Everything',
+//       'message' => t('Everything is broken!!!'),
+//       'link_text' => 'Oops',
+//       'link_path' => 'admin/reports/status',
+//       'link_opts' => [],
+//     ],
+//     (object) [
+//       'message' => t('Everything is broken!!!'),
+//       'link_text' => 'Oops',
+//       'link_path' => 'admin/reports/status',
+//       'link_opts' => [],
+//     ],
+//   ];
+// }
 
 
 
