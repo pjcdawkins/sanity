@@ -122,13 +122,15 @@ function sanity_refresh($last_refreshed) {
       'query' => FALSE,
       'fetch_cb' => '',
       'params' => [],
+      'limit' => FALSE,
       'results_cb' => '',
     ];
 
     $results = [];
 
     if ($check['query']) {
-      $stmt = db_query($check['query'], $check['params']);
+      $stmt = $check['limit'] !== FALSE ? db_query_range($check['query'], 0, $check['limit'], $check['params'])
+        : db_query_range($check['query'], $check['params']);
       $queried = $stmt->fetchAll();
       $results = ($check['fetch_cb'] ? array_map($check['fetch_cb'], $queried) : $queried);
     }
@@ -301,11 +303,12 @@ function dblog_sanity($last_refreshed) {
   $items = [];
 
   $items['watchdog_alerts'] = [
-    'query' => "SELECT * FROM watchdog WHERE timestamp > :ts AND severity <= :sev;",
+    'query' => "SELECT * FROM watchdog WHERE timestamp > :ts AND severity <= :sev GROUP BY type, message ORDER BY timestamp DESC",
     'params' => [
       ':ts' => max($last_refreshed, time() - 604800),
       ':sev' => WATCHDOG_ERROR,
     ],
+    'limit' => 100,
     'fetch_cb' => 'dblog_sanity_prepare',
   ];
 
